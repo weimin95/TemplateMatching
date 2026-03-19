@@ -18,7 +18,7 @@ The sample assets are:
 ## Prerequisites
 
 - CMake 3.25 or newer
-- A C++20 compiler
+- A C++17 compiler
 - OpenCV installed and discoverable by CMake
 
 If CMake cannot find OpenCV automatically, configure with `-DOpenCV_DIR=...`.
