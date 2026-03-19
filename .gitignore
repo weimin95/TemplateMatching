@@ -1,0 +1,14 @@
+/build/
+/output/
+/models/
+/*_artifacts/
+/.vs/
+*.user
+*.suo
+*.pdb
+*.ilk
+*.obj
+*.ipch
+*.tlog
+*.tmp
+*.log
