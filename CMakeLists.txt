@@ -61,34 +61,41 @@ endif()
 
 enable_testing()
 
-add_library(shape_match_sample_headers INTERFACE)
-target_include_directories(shape_match_sample_headers INTERFACE
+add_library(shape_matcher SHARED)
+target_sources(shape_matcher
+    PRIVATE
+        src/shape_matcher.cpp
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        FILES
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/shape_match_sample/export.hpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/shape_match_sample/shape_matcher.hpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/shape_match_sample/types.hpp
+)
+target_include_directories(shape_matcher PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_compile_definitions(shape_match_sample_headers INTERFACE
-    SHAPE_MATCH_SAMPLE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-)
-
-add_library(shape_match_sample_lib SHARED
-    src/shape_matcher.cpp
-)
-target_compile_definitions(shape_match_sample_lib PRIVATE
+target_compile_definitions(shape_matcher
+    PUBLIC
+        SHAPE_MATCH_SAMPLE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    PRIVATE
     SHAPE_MATCH_SAMPLE_BUILD_DLL
 )
-target_link_libraries(shape_match_sample_lib PUBLIC
-    shape_match_sample_headers
+target_link_libraries(shape_matcher PUBLIC
     shape_based_matching_upstream
     ${SHAPE_MATCH_OPENCV_TARGETS}
 )
 if(MSVC)
-    target_compile_options(shape_match_sample_lib PRIVATE /bigobj)
+    target_compile_options(shape_matcher PRIVATE /bigobj)
 endif()
 
 add_executable(shape_match_sample
     src/main.cpp
 )
 target_link_libraries(shape_match_sample PRIVATE
-    shape_match_sample_lib
+    shape_matcher
 )
 
 function(shape_match_copy_runtime_dlls target_name)
@@ -106,42 +113,42 @@ add_executable(roi_train
     tests/roi_train.cpp
 )
 target_link_libraries(roi_train PRIVATE
-    shape_match_sample_lib
+    shape_matcher
 )
 
 add_executable(match_smoke
     tests/match_smoke.cpp
 )
 target_link_libraries(match_smoke PRIVATE
-    shape_match_sample_lib
+    shape_matcher
 )
 
 add_executable(dll_train_match
     tests/dll_train_match.cpp
 )
 target_link_libraries(dll_train_match PRIVATE
-    shape_match_sample_lib
+    shape_matcher
 )
 
 add_executable(dll_persistence
     tests/dll_persistence.cpp
 )
 target_link_libraries(dll_persistence PRIVATE
-    shape_match_sample_lib
+    shape_matcher
 )
 
 add_executable(roi_match
     tests/roi_match.cpp
 )
 target_link_libraries(roi_match PRIVATE
-    shape_match_sample_lib
+    shape_matcher
 )
 
 add_executable(train_smoke
     tests/train_smoke.cpp
 )
 target_link_libraries(train_smoke PRIVATE
-    shape_match_sample_lib
+    shape_matcher
 )
 
 shape_match_copy_runtime_dlls(match_smoke)

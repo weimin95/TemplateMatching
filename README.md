@@ -31,8 +31,8 @@ cmake --build build --config Debug
 
 The main outputs are:
 
-- `build/Debug/shape_match_sample_lib.dll`
-- `build/Debug/shape_match_sample_lib.lib`
+- `build/Debug/shape_matcher.dll`
+- `build/Debug/shape_matcher.lib`
 - `build/Debug/shape_match_sample.exe`
 
 ## DLL API
