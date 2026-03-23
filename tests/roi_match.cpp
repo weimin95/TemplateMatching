@@ -1,4 +1,4 @@
-#include "shape_match_sample/pipeline.hpp"
+#include "shape_match_sample/shape_matcher.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -49,18 +49,22 @@ int main() {
     const auto source_dir = std::filesystem::path{SHAPE_MATCH_SAMPLE_SOURCE_DIR};
     const auto template_path = source_dir / "assets" / "template.bmp";
     const auto scene_path = source_dir / "assets" / "scene.bmp";
-    const auto workspace = std::filesystem::current_path() / "roi_match_artifacts";
-    const auto model_dir = workspace / "models" / "default";
-    const auto overlay_path = workspace / "output" / "roi_match_overlay.png";
+    const cv::Mat template_image = cv::imread(template_path.string(), cv::IMREAD_COLOR);
+    const cv::Mat scene_image = cv::imread(scene_path.string(), cv::IMREAD_COLOR);
+    if (template_image.empty() || scene_image.empty()) {
+        std::cerr << "Failed to load ROI test images.\n";
+        return 1;
+    }
 
     shape_match_sample::TrainOptions train_options;
     train_options.train_roi = non_black_bbox(template_path);
-    shape_match_sample::train_model(template_path, model_dir, train_options);
+    shape_match_sample::ShapeMatcher matcher;
+    matcher.train(template_image, train_options);
 
     shape_match_sample::MatchOptions match_options;
     match_options.search_roi = non_black_bbox(scene_path);
 
-    const auto match_result = shape_match_sample::match_model(scene_path, model_dir, overlay_path, match_options);
+    const auto match_result = matcher.match(scene_image, match_options);
     if (match_result.matches.empty()) {
         std::cerr << "No matches were produced for ROI matching.\n";
         return 1;

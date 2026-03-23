@@ -40,7 +40,7 @@ struct TrainResult {
 };
 
 struct MatchOptions {
-    std::string class_id{"default"};
+    std::string class_id;
     std::optional<Roi> search_roi;
     float min_score{90.0f};
     std::size_t top_k{5};
@@ -60,16 +60,5 @@ struct MatchResult {
     std::vector<MatchHit> matches;
     std::filesystem::path overlay_path;
 };
-
-TrainResult train_model(
-    const std::filesystem::path& template_image_path,
-    const std::filesystem::path& model_dir,
-    const TrainOptions& options = {});
-
-MatchResult match_model(
-    const std::filesystem::path& scene_image_path,
-    const std::filesystem::path& model_dir,
-    const std::filesystem::path& overlay_path,
-    const MatchOptions& options = {});
 
 }  // namespace shape_match_sample

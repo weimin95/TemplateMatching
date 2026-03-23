@@ -1,9 +1,10 @@
-#include "shape_match_sample/pipeline.hpp"
+#include "shape_match_sample/shape_matcher.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
-#include <string>
+#include <utility>
 #include <vector>
 
 #include <opencv2/core.hpp>
@@ -24,6 +25,8 @@ struct ModelMetadata {
     std::vector<int> pyramid_levels;
     float weak_threshold{};
     float strong_threshold{};
+    std::size_t generated_view_count{};
+    std::size_t template_count{};
 };
 
 cv::Rect resolve_roi(const std::optional<Roi>& roi, const cv::Size& image_size, const char* label) {
@@ -42,6 +45,20 @@ cv::Rect resolve_roi(const std::optional<Roi>& roi, const cv::Size& image_size, 
     }
 
     return cv::Rect{roi->x, roi->y, roi->width, roi->height};
+}
+
+cv::Rect resolve_result_roi(const Roi& roi, const cv::Size& image_size, const char* label) {
+    if (roi.width <= 0 || roi.height <= 0) {
+        throw std::runtime_error(std::string(label) + " ROI width and height must be positive.");
+    }
+    if (roi.x < 0 || roi.y < 0) {
+        throw std::runtime_error(std::string(label) + " ROI x and y must be non-negative.");
+    }
+    if (roi.x + roi.width > image_size.width || roi.y + roi.height > image_size.height) {
+        throw std::runtime_error(std::string(label) + " ROI exceeds image bounds.");
+    }
+
+    return cv::Rect{roi.x, roi.y, roi.width, roi.height};
 }
 
 Roi to_roi(const cv::Rect& rect) {
@@ -79,51 +96,70 @@ void assign_shape_ranges(
     shapes.scale_step = options.scale_step;
 }
 
+std::string normalize_class_id(const std::string& class_id) {
+    if (class_id.empty()) {
+        throw std::runtime_error("class_id must not be empty.");
+    }
+    return class_id;
+}
+
+std::string resolve_match_class_id(const std::string& requested, const std::string& active) {
+    if (requested.empty()) {
+        return active;
+    }
+    if (requested != active) {
+        throw std::runtime_error("Requested class_id does not match the loaded model.");
+    }
+    return requested;
+}
+
+void ensure_parent_directory(const std::filesystem::path& path) {
+    const auto parent = path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent);
+    }
+}
+
+cv::Mat read_color_image(const std::filesystem::path& image_path, const char* label) {
+    const cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_COLOR);
+    if (image.empty()) {
+        throw std::runtime_error(std::string("Failed to read ") + label + " image: " + image_path.string());
+    }
+    return image;
+}
+
 void write_model_metadata(
     const std::filesystem::path& meta_path,
-    const TrainOptions& options,
-    const cv::Size& template_size,
-    const Roi& train_roi,
-    std::size_t generated_view_count,
-    std::size_t template_count) {
+    const ModelMetadata& meta) {
     cv::FileStorage fs(meta_path.string(), cv::FileStorage::WRITE);
     if (!fs.isOpened()) {
         throw std::runtime_error("Failed to open metadata file for writing: " + meta_path.string());
     }
 
-    fs << "class_id" << options.class_id;
-    fs << "template_width" << template_size.width;
-    fs << "template_height" << template_size.height;
+    fs << "class_id" << meta.class_id;
+    fs << "template_width" << meta.template_width;
+    fs << "template_height" << meta.template_height;
 
     fs << "train_roi" << "{";
-    fs << "x" << train_roi.x;
-    fs << "y" << train_roi.y;
-    fs << "width" << train_roi.width;
-    fs << "height" << train_roi.height;
+    fs << "x" << meta.train_roi.x;
+    fs << "y" << meta.train_roi.y;
+    fs << "width" << meta.train_roi.width;
+    fs << "height" << meta.train_roi.height;
     fs << "}";
 
     fs << "detector" << "{";
-    fs << "num_features" << options.num_features;
-    fs << "weak_threshold" << options.weak_threshold;
-    fs << "strong_threshold" << options.strong_threshold;
+    fs << "num_features" << meta.num_features;
+    fs << "weak_threshold" << meta.weak_threshold;
+    fs << "strong_threshold" << meta.strong_threshold;
     fs << "pyramid_levels" << "[";
-    for (const auto level : options.pyramid_levels) {
+    for (const auto level : meta.pyramid_levels) {
         fs << level;
     }
     fs << "]";
     fs << "}";
 
-    fs << "augment" << "{";
-    fs << "angle_start" << options.angle_start;
-    fs << "angle_end" << options.angle_end;
-    fs << "angle_step" << options.angle_step;
-    fs << "scale_start" << options.scale_start;
-    fs << "scale_end" << options.scale_end;
-    fs << "scale_step" << options.scale_step;
-    fs << "}";
-
-    fs << "generated_view_count" << static_cast<int>(generated_view_count);
-    fs << "template_count" << static_cast<int>(template_count);
+    fs << "generated_view_count" << static_cast<int>(meta.generated_view_count);
+    fs << "template_count" << static_cast<int>(meta.template_count);
 }
 
 ModelMetadata load_model_metadata(const std::filesystem::path& meta_path) {
@@ -152,6 +188,9 @@ ModelMetadata load_model_metadata(const std::filesystem::path& meta_path) {
     for (const auto& node : pyramid_levels) {
         meta.pyramid_levels.push_back(static_cast<int>(node));
     }
+
+    meta.generated_view_count = static_cast<int>(fs["generated_view_count"]);
+    meta.template_count = static_cast<int>(fs["template_count"]);
 
     if (meta.class_id.empty()) {
         throw std::runtime_error("Model metadata is missing class_id.");
@@ -246,19 +285,31 @@ cv::Mat pad_for_matching(const cv::Mat& image, int stride) {
 
 }  // namespace
 
-TrainResult train_model(
-    const std::filesystem::path& template_image_path,
-    const std::filesystem::path& model_dir,
-    const TrainOptions& options) {
+class ShapeMatcher::Impl {
+public:
+    std::unique_ptr<line2Dup::Detector> detector;
+    ModelMetadata meta;
+    std::vector<shape_based_matching::shapeInfo_producer::Info> infos;
+    bool has_model{false};
+};
+
+ShapeMatcher::ShapeMatcher() : impl_(std::make_unique<Impl>()) {}
+
+ShapeMatcher::~ShapeMatcher() = default;
+
+ShapeMatcher::ShapeMatcher(ShapeMatcher&& other) noexcept = default;
+
+ShapeMatcher& ShapeMatcher::operator=(ShapeMatcher&& other) noexcept = default;
+
+TrainResult ShapeMatcher::train(const cv::Mat& template_image, const TrainOptions& options) {
+    if (template_image.empty()) {
+        throw std::runtime_error("Template image is empty.");
+    }
     if (options.pyramid_levels.empty()) {
         throw std::runtime_error("At least one pyramid level is required.");
     }
 
-    const cv::Mat template_image = cv::imread(template_image_path.string(), cv::IMREAD_COLOR);
-    if (template_image.empty()) {
-        throw std::runtime_error("Failed to read template image: " + template_image_path.string());
-    }
-
+    const auto class_id = normalize_class_id(options.class_id);
     const cv::Rect train_rect = resolve_roi(options.train_roi, template_image.size(), "Training");
     const cv::Mat train_crop = template_image(train_rect).clone();
     cv::Mat mask = make_foreground_mask(train_crop);
@@ -266,7 +317,7 @@ TrainResult train_model(
         throw std::runtime_error("Training ROI does not contain any non-black pixels.");
     }
 
-    line2Dup::Detector detector(
+    auto detector = std::make_unique<line2Dup::Detector>(
         options.num_features,
         options.pyramid_levels,
         options.weak_threshold,
@@ -280,9 +331,9 @@ TrainResult train_model(
     infos_with_templates.reserve(shapes.infos.size());
 
     for (const auto& info : shapes.infos) {
-        const int template_id = detector.addTemplate(
+        const int template_id = detector->addTemplate(
             shapes.src_of(info),
-            options.class_id,
+            class_id,
             shapes.mask_of(info),
             options.num_features);
         if (template_id != -1) {
@@ -294,6 +345,46 @@ TrainResult train_model(
         throw std::runtime_error("Training did not produce any valid templates.");
     }
 
+    Impl next_state;
+    next_state.detector = std::move(detector);
+    next_state.meta = ModelMetadata{
+        class_id,
+        to_roi(train_rect),
+        template_image.cols,
+        template_image.rows,
+        options.num_features,
+        options.pyramid_levels,
+        options.weak_threshold,
+        options.strong_threshold,
+        shapes.infos.size(),
+        infos_with_templates.size()
+    };
+    next_state.infos = std::move(infos_with_templates);
+    next_state.has_model = true;
+
+    *impl_ = std::move(next_state);
+
+    return TrainResult{
+        impl_->meta.generated_view_count,
+        impl_->meta.template_count,
+        impl_->meta.train_roi,
+        {},
+        {},
+        {}
+    };
+}
+
+TrainResult ShapeMatcher::trainFromFile(
+    const std::filesystem::path& template_image_path,
+    const TrainOptions& options) {
+    return train(read_color_image(template_image_path, "template"), options);
+}
+
+void ShapeMatcher::save(const std::filesystem::path& model_dir) const {
+    if (empty()) {
+        throw std::runtime_error("Cannot save a model before training or loading one.");
+    }
+
     std::filesystem::create_directories(model_dir);
     const auto template_yaml_path = model_dir / "template.yaml";
     const auto info_yaml_path = model_dir / "info.yaml";
@@ -303,37 +394,14 @@ TrainResult train_model(
     if (!template_fs.isOpened()) {
         throw std::runtime_error("Failed to open template.yaml for writing: " + template_yaml_path.string());
     }
-    detector.writeClass(options.class_id, template_fs);
+    impl_->detector->writeClass(impl_->meta.class_id, template_fs);
 
-    shape_based_matching::shapeInfo_producer::save_infos(infos_with_templates, info_yaml_path.string());
-    write_model_metadata(
-        meta_yaml_path,
-        options,
-        template_image.size(),
-        to_roi(train_rect),
-        shapes.infos.size(),
-        infos_with_templates.size());
-
-    return TrainResult{
-        infos_with_templates.size(),
-        infos_with_templates.size(),
-        to_roi(train_rect),
-        template_yaml_path,
-        info_yaml_path,
-        meta_yaml_path
-    };
+    auto infos = impl_->infos;
+    shape_based_matching::shapeInfo_producer::save_infos(infos, info_yaml_path.string());
+    write_model_metadata(meta_yaml_path, impl_->meta);
 }
 
-MatchResult match_model(
-    const std::filesystem::path& scene_image_path,
-    const std::filesystem::path& model_dir,
-    const std::filesystem::path& overlay_path,
-    const MatchOptions& options) {
-    const cv::Mat scene_image = cv::imread(scene_image_path.string(), cv::IMREAD_COLOR);
-    if (scene_image.empty()) {
-        throw std::runtime_error("Failed to read scene image: " + scene_image_path.string());
-    }
-
+void ShapeMatcher::load(const std::filesystem::path& model_dir, const std::string& class_id) {
     const auto template_yaml_path = model_dir / "template.yaml";
     const auto info_yaml_path = model_dir / "info.yaml";
     const auto meta_yaml_path = model_dir / "model_meta.yaml";
@@ -347,10 +415,10 @@ MatchResult match_model(
         throw std::runtime_error("model_meta.yaml was not found: " + meta_yaml_path.string());
     }
 
-    const auto meta = load_model_metadata(meta_yaml_path);
-    const auto class_id = options.class_id.empty() ? meta.class_id : options.class_id;
+    ModelMetadata meta = load_model_metadata(meta_yaml_path);
+    const auto effective_class_id = class_id.empty() ? meta.class_id : normalize_class_id(class_id);
 
-    line2Dup::Detector detector(
+    auto detector = std::make_unique<line2Dup::Detector>(
         meta.num_features,
         meta.pyramid_levels,
         meta.weak_threshold,
@@ -360,40 +428,103 @@ MatchResult match_model(
     if (!template_fs.isOpened()) {
         throw std::runtime_error("Failed to open template.yaml for reading: " + template_yaml_path.string());
     }
-    detector.readClass(template_fs.root(), class_id);
 
-    const auto infos = shape_based_matching::shapeInfo_producer::load_infos(info_yaml_path.string());
-    (void)infos;
+    const auto loaded_class_id = detector->readClass(template_fs.root(), effective_class_id);
+    if (loaded_class_id.empty() || detector->numTemplates(loaded_class_id) == 0) {
+        throw std::runtime_error("No templates were loaded for class_id: " + effective_class_id);
+    }
 
+    Impl next_state;
+    next_state.detector = std::move(detector);
+    next_state.meta = std::move(meta);
+    next_state.meta.class_id = loaded_class_id;
+    next_state.infos = shape_based_matching::shapeInfo_producer::load_infos(info_yaml_path.string());
+    if (next_state.infos.empty()) {
+        throw std::runtime_error("Loaded model info list is empty.");
+    }
+    next_state.has_model = true;
+
+    *impl_ = std::move(next_state);
+}
+
+MatchResult ShapeMatcher::match(const cv::Mat& scene_image, const MatchOptions& options) const {
+    if (empty()) {
+        throw std::runtime_error("Cannot match before training or loading a model.");
+    }
+    if (scene_image.empty()) {
+        throw std::runtime_error("Scene image is empty.");
+    }
+
+    const auto class_id = resolve_match_class_id(options.class_id, impl_->meta.class_id);
     const cv::Rect search_rect = resolve_roi(options.search_roi, scene_image.size(), "Search");
     const cv::Mat search_crop = scene_image(search_rect).clone();
-    const int stride = required_match_stride(meta.pyramid_levels);
+    const int stride = required_match_stride(impl_->meta.pyramid_levels);
     const cv::Mat padded_search_crop = pad_for_matching(search_crop, stride);
 
-    const auto raw_matches = detector.match(padded_search_crop, options.min_score, {class_id});
-
-    cv::Mat overlay = scene_image.clone();
-    cv::rectangle(overlay, search_rect, cv::Scalar{255, 255, 0}, 2, cv::LINE_AA);
+    const auto raw_matches = impl_->detector->match(padded_search_crop, options.min_score, {class_id});
 
     std::vector<MatchHit> hits;
     const auto max_hits = std::min(options.top_k, raw_matches.size());
     hits.reserve(max_hits);
 
     for (std::size_t i = 0; i < max_hits; ++i) {
-        const auto& match = raw_matches[i];
-        const auto& templ = detector.getTemplates(class_id, match.template_id);
+        const auto& raw_match = raw_matches[i];
+        const auto& templ = impl_->detector->getTemplates(class_id, raw_match.template_id);
 
         hits.push_back(MatchHit{
-            search_rect.x + match.x,
-            search_rect.y + match.y,
+            search_rect.x + raw_match.x,
+            search_rect.y + raw_match.y,
             templ[0].width,
             templ[0].height,
-            match.similarity,
-            match.template_id
+            raw_match.similarity,
+            raw_match.template_id
         });
     }
 
-    if (hits.empty()) {
+    return MatchResult{
+        to_roi(search_rect),
+        std::move(hits),
+        {}
+    };
+}
+
+MatchResult ShapeMatcher::matchToFile(
+    const cv::Mat& scene_image,
+    const std::filesystem::path& overlay_path,
+    const MatchOptions& options) const {
+    auto result = match(scene_image, options);
+    const cv::Mat overlay = renderMatches(scene_image, result);
+
+    ensure_parent_directory(overlay_path);
+    if (!cv::imwrite(overlay_path.string(), overlay)) {
+        throw std::runtime_error("Failed to write overlay image: " + overlay_path.string());
+    }
+
+    result.overlay_path = overlay_path;
+    return result;
+}
+
+MatchResult ShapeMatcher::matchFromFile(
+    const std::filesystem::path& scene_image_path,
+    const std::filesystem::path& overlay_path,
+    const MatchOptions& options) const {
+    return matchToFile(read_color_image(scene_image_path, "scene"), overlay_path, options);
+}
+
+cv::Mat ShapeMatcher::renderMatches(const cv::Mat& scene_image, const MatchResult& result) const {
+    if (empty()) {
+        throw std::runtime_error("Cannot render matches before training or loading a model.");
+    }
+    if (scene_image.empty()) {
+        throw std::runtime_error("Scene image is empty.");
+    }
+
+    const cv::Rect search_rect = resolve_result_roi(result.effective_search_roi, scene_image.size(), "Match result");
+
+    cv::Mat overlay = scene_image.clone();
+    cv::rectangle(overlay, search_rect, cv::Scalar{255, 255, 0}, 2, cv::LINE_AA);
+
+    if (result.matches.empty()) {
         cv::putText(
             overlay,
             "0 matches",
@@ -403,20 +534,19 @@ MatchResult match_model(
             cv::Scalar{0, 0, 255},
             2,
             cv::LINE_AA);
-    } else {
-        draw_match_overlay(overlay, hits, detector, class_id);
+        return overlay;
     }
 
-    std::filesystem::create_directories(overlay_path.parent_path());
-    if (!cv::imwrite(overlay_path.string(), overlay)) {
-        throw std::runtime_error("Failed to write overlay image: " + overlay_path.string());
-    }
+    draw_match_overlay(overlay, result.matches, *impl_->detector, impl_->meta.class_id);
+    return overlay;
+}
 
-    return MatchResult{
-        to_roi(search_rect),
-        std::move(hits),
-        overlay_path
-    };
+bool ShapeMatcher::empty() const noexcept {
+    return !impl_->has_model;
+}
+
+void ShapeMatcher::clear() noexcept {
+    impl_ = std::make_unique<Impl>();
 }
 
 }  // namespace shape_match_sample

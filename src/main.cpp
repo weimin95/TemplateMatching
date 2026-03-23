@@ -1,4 +1,4 @@
-#include "shape_match_sample/pipeline.hpp"
+#include "shape_match_sample/shape_matcher.hpp"
 
 #include <exception>
 #include <filesystem>
@@ -88,10 +88,10 @@ int run_train(const ParsedArgs& parsed) {
     }
     options.train_roi = parsed.train_roi;
 
-    const auto result = shape_match_sample::train_model(
-        parsed.positionals[0],
-        parsed.positionals[1],
-        options);
+    shape_match_sample::ShapeMatcher matcher;
+    const auto result = matcher.trainFromFile(parsed.positionals[0], options);
+    const std::filesystem::path model_dir = parsed.positionals[1];
+    matcher.save(model_dir);
 
     std::cout
         << "Generated views: " << result.generated_view_count << '\n'
@@ -100,9 +100,9 @@ int run_train(const ParsedArgs& parsed) {
         << result.effective_train_roi.y << ','
         << result.effective_train_roi.width << ','
         << result.effective_train_roi.height << '\n'
-        << "template.yaml: " << std::filesystem::absolute(result.template_yaml_path).string() << '\n'
-        << "info.yaml: " << std::filesystem::absolute(result.info_yaml_path).string() << '\n'
-        << "model_meta.yaml: " << std::filesystem::absolute(result.meta_yaml_path).string() << '\n';
+        << "template.yaml: " << std::filesystem::absolute(model_dir / "template.yaml").string() << '\n'
+        << "info.yaml: " << std::filesystem::absolute(model_dir / "info.yaml").string() << '\n'
+        << "model_meta.yaml: " << std::filesystem::absolute(model_dir / "model_meta.yaml").string() << '\n';
     return 0;
 }
 
@@ -126,11 +126,15 @@ int run_match(const ParsedArgs& parsed) {
         overlay_path = parsed.positionals[3];
     }
 
-    const auto result = shape_match_sample::match_model(
+    shape_match_sample::ShapeMatcher matcher;
+    matcher.load(parsed.positionals[1], options.class_id);
+
+    shape_match_sample::MatchOptions match_options = options;
+    match_options.class_id.clear();
+    const auto result = matcher.matchFromFile(
         parsed.positionals[0],
-        parsed.positionals[1],
         overlay_path,
-        options);
+        match_options);
 
     std::cout
         << "Search ROI: " << result.effective_search_roi.x << ','

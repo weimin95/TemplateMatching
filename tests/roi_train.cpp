@@ -1,4 +1,4 @@
-#include "shape_match_sample/pipeline.hpp"
+#include "shape_match_sample/shape_matcher.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -49,18 +49,25 @@ int main() {
     const auto source_dir = std::filesystem::path{SHAPE_MATCH_SAMPLE_SOURCE_DIR};
     const auto template_path = source_dir / "assets" / "template.bmp";
     const auto model_dir = std::filesystem::current_path() / "roi_train_artifacts" / "models" / "default";
+    const cv::Mat template_image = cv::imread(template_path.string(), cv::IMREAD_COLOR);
+    if (template_image.empty()) {
+        std::cerr << "Failed to load template image.\n";
+        return 1;
+    }
 
     shape_match_sample::TrainOptions options;
     options.train_roi = non_black_bbox(template_path);
 
-    const auto result = shape_match_sample::train_model(template_path, model_dir, options);
+    shape_match_sample::ShapeMatcher matcher;
+    const auto result = matcher.train(template_image, options);
+    matcher.save(model_dir);
 
     if (result.effective_train_roi.width != options.train_roi->width ||
         result.effective_train_roi.height != options.train_roi->height) {
         std::cerr << "Returned ROI does not match requested ROI.\n";
         return 1;
     }
-    if (!std::filesystem::exists(result.meta_yaml_path)) {
+    if (!std::filesystem::exists(model_dir / "model_meta.yaml")) {
         std::cerr << "model_meta.yaml was not created.\n";
         return 1;
     }

@@ -69,8 +69,11 @@ target_compile_definitions(shape_match_sample_headers INTERFACE
     SHAPE_MATCH_SAMPLE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
-add_library(shape_match_sample_lib STATIC
-    src/pipeline.cpp
+add_library(shape_match_sample_lib SHARED
+    src/shape_matcher.cpp
+)
+target_compile_definitions(shape_match_sample_lib PRIVATE
+    SHAPE_MATCH_SAMPLE_BUILD_DLL
 )
 target_link_libraries(shape_match_sample_lib PUBLIC
     shape_match_sample_headers
@@ -113,6 +116,20 @@ target_link_libraries(match_smoke PRIVATE
     shape_match_sample_lib
 )
 
+add_executable(dll_train_match
+    tests/dll_train_match.cpp
+)
+target_link_libraries(dll_train_match PRIVATE
+    shape_match_sample_lib
+)
+
+add_executable(dll_persistence
+    tests/dll_persistence.cpp
+)
+target_link_libraries(dll_persistence PRIVATE
+    shape_match_sample_lib
+)
+
 add_executable(roi_match
     tests/roi_match.cpp
 )
@@ -128,6 +145,8 @@ target_link_libraries(train_smoke PRIVATE
 )
 
 shape_match_copy_runtime_dlls(match_smoke)
+shape_match_copy_runtime_dlls(dll_persistence)
+shape_match_copy_runtime_dlls(dll_train_match)
 shape_match_copy_runtime_dlls(roi_match)
 shape_match_copy_runtime_dlls(roi_train)
 shape_match_copy_runtime_dlls(shape_match_sample)
@@ -137,6 +156,8 @@ add_test(NAME train_smoke COMMAND train_smoke)
 add_test(NAME roi_train COMMAND roi_train)
 add_test(NAME match_smoke COMMAND match_smoke)
 add_test(NAME roi_match COMMAND roi_match)
+add_test(NAME dll_train_match COMMAND dll_train_match)
+add_test(NAME dll_persistence COMMAND dll_persistence)
 
 add_test(
     NAME cli_train
